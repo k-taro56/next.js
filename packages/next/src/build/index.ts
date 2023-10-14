@@ -1362,6 +1362,7 @@ export default async function build(
               locales: config.i18n?.locales,
               defaultLocale: config.i18n?.defaultLocale,
               nextConfigOutput: config.output,
+              ppr: config.experimental.ppr === true,
             })
         )
 
@@ -1569,6 +1570,7 @@ export default async function build(
                             maxMemoryCacheSize:
                               config.experimental.isrMemoryCacheSize,
                             nextConfigOutput: config.output,
+                            ppr: config.experimental.ppr === true,
                           })
                         }
                       )
