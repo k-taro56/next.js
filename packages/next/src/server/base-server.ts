@@ -114,6 +114,7 @@ import {
 } from './web/utils'
 import {
   NEXT_CACHE_TAGS_HEADER,
+  NEXT_DID_POSTPONE_HEADER,
   NEXT_QUERY_PARAM_PREFIX,
 } from '../lib/constants'
 import { normalizeLocalePath } from '../shared/lib/i18n/normalize-locale-path'
@@ -2545,6 +2546,11 @@ export default abstract class Server<ServerOptions extends Options = Options> {
               body: RenderResult.fromStatic(result.value.pageData as string),
               revalidateOptions,
             }
+          }
+
+          // Mark that the request did postpone.
+          if (cachedData.postponed) {
+            res.setHeader(NEXT_DID_POSTPONE_HEADER, '1')
           }
 
           return {
