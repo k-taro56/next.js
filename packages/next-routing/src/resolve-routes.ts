@@ -231,54 +231,86 @@ function matchesPathname(
   return undefined
 }
 
-function matchesPathnameWithLocaleFallback({
-  pathname,
-  pathnames,
-  basePath,
-  i18n,
-}: {
-  pathname: string
-  pathnames: string[]
-  basePath: string
-  i18n?: ResolveRoutesParams['i18n']
-}): string | undefined {
-  const directMatch = matchesPathname(pathname, pathnames)
-  if (directMatch || !i18n) {
-    return directMatch
-  }
-
+/**
+ * Takes `locale` off the front of `pathname`, behind the base path. Returns
+ * undefined when `pathname` does not start with it.
+ */
+function removeLocale(
+  pathname: string,
+  basePath: string,
+  locale: string
+): string | undefined {
   const withoutBasePath =
     basePath && pathname.startsWith(basePath)
       ? pathname.slice(basePath.length) || '/'
       : pathname
 
-  for (const locale of i18n.locales) {
-    const localePrefix = `/${locale}`
-    if (
-      withoutBasePath !== localePrefix &&
-      !withoutBasePath.startsWith(`${localePrefix}/`)
-    ) {
-      continue
-    }
+  const localePrefix = `/${locale}`
+  if (withoutBasePath === localePrefix) {
+    return basePath || '/'
+  }
+  if (!withoutBasePath.startsWith(`${localePrefix}/`)) {
+    return undefined
+  }
+  return `${basePath}${withoutBasePath.slice(localePrefix.length)}`
+}
 
-    const withoutLocale =
-      withoutBasePath === localePrefix
-        ? '/'
-        : withoutBasePath.slice(localePrefix.length) || '/'
-    const localeFallbackPathname = basePath
-      ? `${basePath}${withoutLocale}`
-      : withoutLocale
-
-    const localeFallbackMatch = matchesPathname(
-      localeFallbackPathname,
-      pathnames
-    )
-    if (localeFallbackMatch) {
-      return localeFallbackMatch
-    }
+/**
+ * App Router outputs have no locale in their pathnames, so a pathname that a
+ * locale was put in front of can only find one with that locale taken off.
+ * `locale` is the locale that may come off. It is undefined where Next.js's own
+ * router would not serve an App Router page at this pathname.
+ */
+function matchesPathnameWithLocaleFallback({
+  pathname,
+  pathnames,
+  basePath,
+  locale,
+}: {
+  pathname: string
+  pathnames: string[]
+  basePath: string
+  locale: string | undefined
+}): string | undefined {
+  const directMatch = matchesPathname(pathname, pathnames)
+  if (directMatch || !locale) {
+    return directMatch
   }
 
-  return undefined
+  const withoutLocale = removeLocale(pathname, basePath, locale)
+  return withoutLocale === undefined
+    ? undefined
+    : matchesPathname(withoutLocale, pathnames)
+}
+
+/**
+ * The pathname to invoke `resolvedPathname` with: `pathname`, without the
+ * locale if `matchesPathnameWithLocaleFallback` had to take it off to find the
+ * output. App Router pages do not expect one.
+ */
+function getInvocationPathname({
+  pathname,
+  resolvedPathname,
+  basePath,
+  locale,
+}: {
+  pathname: string
+  resolvedPathname: string
+  basePath: string
+  locale: string | undefined
+}): string {
+  if (!locale) {
+    return pathname
+  }
+
+  const localePrefix = `${basePath}/${locale}`
+  if (
+    resolvedPathname === localePrefix ||
+    resolvedPathname.startsWith(`${localePrefix}/`)
+  ) {
+    return pathname
+  }
+  return removeLocale(pathname, basePath, locale) ?? pathname
 }
 
 function isDynamicTemplatePathname(pathname: string): boolean {
@@ -410,7 +442,7 @@ function checkDynamicRoutes(
   onMatchRoutes: Route[],
   basePath: string,
   buildId: string,
-  i18n: ResolveRoutesParams['i18n'],
+  fallbackLocale: string | undefined,
   shouldNormalizeNextData?: boolean,
   isDataUrl?: boolean,
   caseSensitive: boolean = false
@@ -454,7 +486,7 @@ function checkDynamicRoutes(
           pathname: pathnameToCheck,
           pathnames,
           basePath,
-          i18n,
+          locale: fallbackLocale,
         })
         if (matchedPath) {
           const resolvedUrl = replacedDestination
@@ -474,7 +506,12 @@ function checkDynamicRoutes(
             },
             url: resolvedUrl,
             resolvedPathname: matchedPath,
-            invocationPathname: checkUrl.pathname,
+            invocationPathname: getInvocationPathname({
+              pathname: checkUrl.pathname,
+              resolvedPathname: matchedPath,
+              basePath,
+              locale: fallbackLocale,
+            }),
           })
           return {
             matched: true,
@@ -586,6 +623,11 @@ export async function resolveRoutes(
         status: number | undefined
       }
     | undefined
+  // The locale an App Router output may be found without. Like Next.js's own
+  // router, an exact pathname may lose the locale the URL left out or the
+  // default one it names; a dynamic route only the one it left out.
+  let exactFallbackLocale: string | undefined
+  let dynamicFallbackLocale: string | undefined
   const initialOrigin = initialUrl.origin
 
   // Check if the original URL is a data URL and normalize if so
@@ -619,6 +661,10 @@ export async function resolveRoutes(
       // Detect domain locale
       const domainLocale = detectDomainLocale(i18n.domains, hostname)
       const defaultLocale = domainLocale?.defaultLocale || i18n.defaultLocale
+
+      if (pathLocaleResult.detectedLocale === defaultLocale) {
+        exactFallbackLocale = defaultLocale
+      }
 
       // Determine target locale if locale detection is enabled
       let targetLocale = pathLocaleResult.detectedLocale || defaultLocale
@@ -688,6 +734,8 @@ export async function resolveRoutes(
         const localeToPrefix =
           targetLocale || domainLocale?.defaultLocale || i18n.defaultLocale
         currentUrl.pathname = `${basePath}/${localeToPrefix}${pathname}`
+        exactFallbackLocale = localeToPrefix
+        dynamicFallbackLocale = localeToPrefix
       }
     }
   }
@@ -876,7 +924,12 @@ export async function resolveRoutes(
   }
 
   // Check if pathname matches any provided pathnames (pathnames are in denormalized form)
-  let matchedPath = matchesPathname(currentUrl.pathname, pathnames)
+  let matchedPath = matchesPathnameWithLocaleFallback({
+    pathname: currentUrl.pathname,
+    pathnames,
+    basePath,
+    locale: exactFallbackLocale,
+  })
   if (matchedPath) {
     for (const route of routes.dynamicRoutes) {
       const match = matchDynamicRoute(currentUrl.pathname, route, caseSensitive)
@@ -914,7 +967,7 @@ export async function resolveRoutes(
         pathname: pathnameToCheck,
         pathnames,
         basePath,
-        i18n,
+        locale: dynamicFallbackLocale,
       })
       if (!dynamicMatchedPath) {
         // When a dynamic route rewrites to a non-template/static destination
@@ -942,7 +995,12 @@ export async function resolveRoutes(
           },
           url: resolvedUrl,
           resolvedPathname: matchedPath,
-          invocationPathname: currentUrl.pathname,
+          invocationPathname: getInvocationPathname({
+            pathname: currentUrl.pathname,
+            resolvedPathname: matchedPath,
+            basePath,
+            locale: exactFallbackLocale,
+          }),
         })
       }
 
@@ -971,7 +1029,12 @@ export async function resolveRoutes(
         },
         url: resolvedUrl,
         resolvedPathname: dynamicMatchedPath,
-        invocationPathname: currentUrl.pathname,
+        invocationPathname: getInvocationPathname({
+          pathname: currentUrl.pathname,
+          resolvedPathname: dynamicMatchedPath,
+          basePath,
+          locale: dynamicFallbackLocale,
+        }),
       })
     }
 
@@ -990,7 +1053,12 @@ export async function resolveRoutes(
       },
       url: currentUrl,
       resolvedPathname: matchedPath,
-      invocationPathname: currentUrl.pathname,
+      invocationPathname: getInvocationPathname({
+        pathname: currentUrl.pathname,
+        resolvedPathname: matchedPath,
+        basePath,
+        locale: exactFallbackLocale,
+      }),
     })
   }
 
@@ -1071,7 +1139,7 @@ export async function resolveRoutes(
           routes.onMatch,
           basePath,
           buildId,
-          i18n,
+          dynamicFallbackLocale,
           shouldNormalizeNextData,
           isDataUrl,
           caseSensitive
@@ -1095,7 +1163,12 @@ export async function resolveRoutes(
           )
         }
 
-        matchedPath = matchesPathname(pathnameCheckUrl.pathname, pathnames)
+        matchedPath = matchesPathnameWithLocaleFallback({
+          pathname: pathnameCheckUrl.pathname,
+          pathnames,
+          basePath,
+          locale: exactFallbackLocale,
+        })
         if (matchedPath) {
           const finalHeaders = applyOnMatchHeaders(
             routes.onMatch,
@@ -1111,7 +1184,12 @@ export async function resolveRoutes(
             },
             url: pathnameCheckUrl,
             resolvedPathname: matchedPath,
-            invocationPathname: pathnameCheckUrl.pathname,
+            invocationPathname: getInvocationPathname({
+              pathname: pathnameCheckUrl.pathname,
+              resolvedPathname: matchedPath,
+              basePath,
+              locale: exactFallbackLocale,
+            }),
           })
         }
       }
@@ -1152,7 +1230,7 @@ export async function resolveRoutes(
           pathname: pathnameToCheck,
           pathnames,
           basePath,
-          i18n,
+          locale: dynamicFallbackLocale,
         })
         if (matchedPath) {
           const resolvedUrl = replacedDestination
@@ -1173,7 +1251,12 @@ export async function resolveRoutes(
             },
             url: resolvedUrl,
             resolvedPathname: matchedPath,
-            invocationPathname: currentUrl.pathname,
+            invocationPathname: getInvocationPathname({
+              pathname: currentUrl.pathname,
+              resolvedPathname: matchedPath,
+              basePath,
+              locale: dynamicFallbackLocale,
+            }),
           })
         }
       }
@@ -1252,7 +1335,7 @@ export async function resolveRoutes(
           routes.onMatch,
           basePath,
           buildId,
-          i18n,
+          dynamicFallbackLocale,
           shouldNormalizeNextData,
           isDataUrl,
           caseSensitive
@@ -1276,7 +1359,12 @@ export async function resolveRoutes(
           )
         }
 
-        matchedPath = matchesPathname(pathnameCheckUrl.pathname, pathnames)
+        matchedPath = matchesPathnameWithLocaleFallback({
+          pathname: pathnameCheckUrl.pathname,
+          pathnames,
+          basePath,
+          locale: exactFallbackLocale,
+        })
         if (matchedPath) {
           const finalHeaders = applyOnMatchHeaders(
             routes.onMatch,
@@ -1292,7 +1380,12 @@ export async function resolveRoutes(
             },
             url: pathnameCheckUrl,
             resolvedPathname: matchedPath,
-            invocationPathname: pathnameCheckUrl.pathname,
+            invocationPathname: getInvocationPathname({
+              pathname: pathnameCheckUrl.pathname,
+              resolvedPathname: matchedPath,
+              basePath,
+              locale: exactFallbackLocale,
+            }),
           })
         }
       }

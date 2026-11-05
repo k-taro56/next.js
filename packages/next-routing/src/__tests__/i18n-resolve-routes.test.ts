@@ -438,4 +438,132 @@ describe('resolveRoutes with i18n', () => {
       expect(result.resolvedPathname).toBe('/app-dir/[[...slug]]')
     })
   })
+
+  // App Router outputs have no locale in their pathnames, and Pages Router
+  // outputs have one for each locale. Next.js's own router serves an App Router
+  // page without a locale. It also serves an exact pathname with the default
+  // locale, and nothing under any other locale.
+  describe('App Router outputs', () => {
+    const i18n = { ...i18nConfigNoDomains, localeDetection: false as const }
+    const pathnames = [
+      '/app-dir',
+      '/app-dir/static',
+      '/app-dir/blog/[slug]',
+      '/english',
+      '/en/pages-dir',
+      '/fr/pages-dir',
+      '/en/pages-dir/[id]',
+      '/fr/pages-dir/[id]',
+    ]
+    const dynamicRoutes = [
+      {
+        sourceRegex:
+          '^[/]?(?<nextLocale>[^/]{1,})/app\\-dir/blog/(?<nxtPslug>[^/]+?)(?:/)?$',
+        destination: '/$nextLocale/app-dir/blog/[slug]?nxtPslug=$nxtPslug',
+      },
+      {
+        sourceRegex:
+          '^[/]?(?<nextLocale>[^/]{1,})/pages\\-dir/(?<nxtPid>[^/]+?)(?:/)?$',
+        destination: '/$nextLocale/pages-dir/[id]?nxtPid=$nxtPid',
+      },
+    ]
+
+    function resolve(
+      url: string,
+      overrides: Partial<ResolveRoutesParams> = {}
+    ) {
+      return resolveRoutes({
+        ...baseParams,
+        url: new URL(url),
+        headers: new Headers({}),
+        pathnames,
+        routes: { ...baseParams.routes, dynamicRoutes },
+        i18n,
+        ...overrides,
+      })
+    }
+
+    it.each([
+      ['/app-dir/static', '/app-dir/static'],
+      ['/app-dir', '/app-dir'],
+      ['/en/app-dir/static', '/app-dir/static'],
+      ['/english', '/english'],
+    ])('should resolve the exact pathname %s', async (pathname, output) => {
+      const result = await resolve(`http://example.com${pathname}`)
+
+      expect(result.resolvedPathname).toBe(output)
+      expect(result.invocationTarget?.pathname).toBe(output)
+    })
+
+    it('should resolve a dynamic route when the URL has no locale', async () => {
+      const result = await resolve('http://example.com/app-dir/blog/first')
+
+      expect(result.resolvedPathname).toBe('/app-dir/blog/[slug]')
+      expect(result.invocationTarget?.pathname).toBe('/app-dir/blog/first')
+      expect(result.routeMatches?.nxtPslug).toBe('first')
+    })
+
+    it.each([
+      '/fr/app-dir/static',
+      '/fr/app-dir',
+      '/en/app-dir/blog/first',
+      '/fr/app-dir/blog/first',
+    ])('should not resolve %s', async (pathname) => {
+      const result = await resolve(`http://example.com${pathname}`)
+
+      expect(result.resolvedPathname).toBeUndefined()
+    })
+
+    it('should use the default locale of the domain', async () => {
+      const domains = {
+        ...i18n,
+        domains: [{ domain: 'example.fr', defaultLocale: 'fr' }],
+      }
+
+      const implied = await resolve('http://example.fr/app-dir/static', {
+        i18n: domains,
+      })
+      const named = await resolve('http://example.fr/fr/app-dir/static', {
+        i18n: domains,
+      })
+      const other = await resolve('http://example.fr/en/app-dir/static', {
+        i18n: domains,
+      })
+
+      expect(implied.resolvedPathname).toBe('/app-dir/static')
+      expect(named.resolvedPathname).toBe('/app-dir/static')
+      expect(other.resolvedPathname).toBeUndefined()
+    })
+
+    it('should find outputs under the base path', async () => {
+      const options = {
+        basePath: '/docs',
+        pathnames: ['/docs/app-dir/static', '/docs/app-dir'],
+      }
+
+      const result = await resolve(
+        'http://example.com/docs/app-dir/static',
+        options
+      )
+      const named = await resolve('http://example.com/docs/en/app-dir', options)
+
+      expect(result.resolvedPathname).toBe('/docs/app-dir/static')
+      expect(result.invocationTarget?.pathname).toBe('/docs/app-dir/static')
+      expect(named.resolvedPathname).toBe('/docs/app-dir')
+      expect(named.invocationTarget?.pathname).toBe('/docs/app-dir')
+    })
+
+    it('should keep the locale of Pages Router outputs', async () => {
+      const implied = await resolve('http://example.com/pages-dir')
+      const named = await resolve('http://example.com/fr/pages-dir')
+      const dynamic = await resolve('http://example.com/pages-dir/1')
+
+      expect(implied.resolvedPathname).toBe('/en/pages-dir')
+      expect(implied.invocationTarget?.pathname).toBe('/en/pages-dir')
+      expect(named.resolvedPathname).toBe('/fr/pages-dir')
+      expect(named.invocationTarget?.pathname).toBe('/fr/pages-dir')
+      expect(dynamic.resolvedPathname).toBe('/en/pages-dir/[id]')
+      expect(dynamic.invocationTarget?.pathname).toBe('/en/pages-dir/1')
+    })
+  })
 })
